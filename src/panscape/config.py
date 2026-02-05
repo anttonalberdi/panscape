@@ -33,7 +33,7 @@ class BuildConfig(CommonConfig):
     genomes_tsv: Path | None = None
     genomes_path: Path | None = None
     genomes_files: list[str] = Field(default_factory=list)
-    run_checkm2: bool = False
+    run_checkm2: bool = True
     checkm2_db: Path | None = None
 
     min_completeness: float = Field(default=70.0, ge=0.0, le=100.0)

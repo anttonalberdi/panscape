@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 
@@ -70,3 +71,34 @@ def test_build_mock_integration(tmp_path: Path) -> None:
         _assert_nonempty_tsv(species_dir / "gene_tiers.tsv")
         _assert_nonempty_tsv(species_dir / "catalog_summary.tsv")
         assert (species_dir / "index" / "INDEX_PLAN.json").exists()
+
+
+def test_build_mock_defaults_to_checkm2_when_qc_missing(tmp_path: Path) -> None:
+    g1 = tmp_path / "g1.fna"
+    g2 = tmp_path / "g2.fna"
+    g1.write_text(">g1\nACGTACGTACGTACGTACGTACGT\n", encoding="utf-8")
+    g2.write_text(">g2\nACGTACGTACGTACGTACGTACGA\n", encoding="utf-8")
+
+    outdir = tmp_path / "build_run_no_qc"
+    result = runner.invoke(
+        app,
+        [
+            "build",
+            "--mock",
+            "--genomes-files",
+            f"{g1},{g2}",
+            "--outdir",
+            str(outdir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+
+    qc_path = outdir / "build" / "qc" / "genome_qc.tsv"
+    assert qc_path.exists()
+    with qc_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        rows = list(reader)
+
+    assert rows
+    assert all(row["qc_source"] == "checkm2" for row in rows)
