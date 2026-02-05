@@ -649,9 +649,6 @@ def run_build(
         if cfg.checkm2_db is not None and not cfg.checkm2_db.exists():
             raise PanScapeUsageError(f"CheckM2 DB path does not exist: {cfg.checkm2_db}")
 
-        if outdir is None and cfg.outdir == Path("panscape_out") and config_path is None:
-            raise PanScapeUsageError("Missing output directory. Provide --outdir or set build.outdir in config.")
-
         if using_manifest:
             assert cfg.genomes_tsv is not None
             genomes = parse_genomes_manifest(cfg.genomes_tsv)

@@ -4,7 +4,7 @@ import shutil
 from pathlib import Path
 
 from panscape.runners.base import ToolRunner
-from panscape.utils.subprocess import CommandResult
+from panscape.utils.subprocess import CommandExecutionError, CommandResult
 
 
 class SkaniRunner(ToolRunner):
@@ -22,7 +22,17 @@ class SkaniRunner(ToolRunner):
         return version_line or "unknown"
 
     def dist_pair(self, *, query: Path, reference: Path, dry_run: bool = False) -> CommandResult:
-        return self.run(
+        # Newer skani releases expect positional QUERY and REFERENCE inputs.
+        positional = self.run(
+            ["dist", str(query), str(reference), "--min-af", "0"],
+            dry_run=dry_run,
+            check=False,
+        )
+        if dry_run or positional.returncode == 0:
+            return positional
+
+        # Legacy fallback for older skani variants.
+        legacy = self.run(
             [
                 "dist",
                 "--query",
@@ -33,4 +43,13 @@ class SkaniRunner(ToolRunner):
                 "0",
             ],
             dry_run=dry_run,
+            check=False,
+        )
+        if legacy.returncode == 0:
+            return legacy
+
+        raise CommandExecutionError(
+            "skani dist failed with both positional and legacy flag syntaxes.\n"
+            f"positional stderr: {positional.stderr.strip()}\n"
+            f"legacy stderr: {legacy.stderr.strip()}"
         )

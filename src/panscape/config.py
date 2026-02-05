@@ -14,7 +14,7 @@ class CommonConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    outdir: Path = Path("panscape_out")
+    outdir: Path = Field(default_factory=Path.cwd)
     threads: PositiveInt = 1
     dry_run: bool = False
     force: bool = False
