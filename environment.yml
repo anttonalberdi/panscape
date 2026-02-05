@@ -31,4 +31,4 @@ dependencies:
 
   - pip:
       - types-PyYAML>=6.0.12.20241230
-      - -e .
+      - git+https://github.com/anttonalberdi/panscape.git
