@@ -31,6 +31,7 @@ from panscape.runners.mash import MashRunner
 from panscape.runners.mmseqs import MMseqsRunner
 from panscape.runners.skani import SkaniRunner
 from panscape.utils.io import ensure_dir, write_json, write_text, write_tsv
+from panscape.utils.subprocess import CommandExecutionError
 from panscape.utils.validation import FASTA_SUFFIXES, validate_existing_file
 
 app = typer.Typer(help="Build species clusters, backbones, and species pangenome catalogs.")
@@ -257,6 +258,29 @@ def parse_genomes_path_input(genomes_path: Path) -> list[GenomeInput]:
     return _build_genome_inputs_from_paths(detected_paths)
 
 
+def detect_fasta_extension(paths: Iterable[Path]) -> str:
+    """Detect one FASTA extension token suitable for CheckM2 --extension."""
+
+    extensions: list[str] = []
+    suffixes = sorted(FASTA_SUFFIXES, key=len, reverse=True)
+    for path in paths:
+        lowered = path.name.lower()
+        match = next((suffix for suffix in suffixes if lowered.endswith(suffix)), None)
+        if match is None:
+            continue
+        extensions.append(match.lstrip("."))
+
+    if len(extensions) == 0:
+        raise PanScapeUsageError("Unable to infer FASTA extension for CheckM2 input genomes.")
+
+    counts: dict[str, int] = {}
+    for ext in extensions:
+        counts[ext] = counts.get(ext, 0) + 1
+
+    # Deterministic winner by highest frequency, then lexical order.
+    return sorted(counts, key=lambda ext: (-counts[ext], ext))[0]
+
+
 def resolve_checkm2_db_path(checkm2_db: Path) -> Path:
     """Resolve --checkm2-db to the full uniref100.KO.1.dmnd file path."""
 
@@ -282,6 +306,16 @@ def resolve_checkm2_db_path(checkm2_db: Path) -> Path:
             f"`{CHECKM2_DMND_FILENAME}`. Missing in: {resolved}"
         )
     return dmnd_path
+
+
+def _looks_like_checkm2_multiprocessing_bug(error_text: str) -> bool:
+    lowered = error_text.lower()
+    markers = [
+        "__set_up_prodigal_thread",
+        "__reportprogress",
+        "no protein files were generated",
+    ]
+    return any(marker in lowered for marker in markers)
 
 
 def _format_optional_float(value: float | None, digits: int = 4) -> str:
@@ -847,14 +881,36 @@ def run_build(
                 checkm2_predictions = _mock_checkm2_predictions(contexts)
             else:
                 checkm2_dir = ensure_dir(qc_dir / "checkm2")
-                checkm2_runner.predict(
-                    input_dir=normalized_dir,
-                    output_dir=checkm2_dir,
-                    threads=cfg.threads,
-                    database_path=resolved_checkm2_db,
-                    force=cfg.force,
-                    dry_run=cfg.dry_run,
+                checkm2_extension = detect_fasta_extension(
+                    contexts[genome_id].normalized_fasta for genome_id in missing_qc_ids
                 )
+                try:
+                    checkm2_runner.predict(
+                        input_dir=normalized_dir,
+                        output_dir=checkm2_dir,
+                        threads=cfg.threads,
+                        database_path=resolved_checkm2_db,
+                        extension=checkm2_extension,
+                        force=cfg.force,
+                        dry_run=cfg.dry_run,
+                    )
+                except CommandExecutionError as exc:
+                    if cfg.threads > 1 and _looks_like_checkm2_multiprocessing_bug(str(exc)):
+                        logger.warning(
+                            "CheckM2 multiprocessing issue detected; retrying with --threads 1. "
+                            "This is a known CheckM2/Python compatibility workaround."
+                        )
+                        checkm2_runner.predict(
+                            input_dir=normalized_dir,
+                            output_dir=checkm2_dir,
+                            threads=1,
+                            database_path=resolved_checkm2_db,
+                            extension=checkm2_extension,
+                            force=True,
+                            dry_run=cfg.dry_run,
+                        )
+                    else:
+                        raise
                 report_path = _find_checkm2_report(checkm2_dir)
                 checkm2_predictions = _parse_checkm2_report(report_path)
 

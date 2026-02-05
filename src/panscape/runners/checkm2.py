@@ -28,6 +28,7 @@ class CheckM2Runner(ToolRunner):
         output_dir: Path,
         threads: int,
         database_path: Path | None,
+        extension: str | None = None,
         force: bool = False,
         dry_run: bool = False,
     ) -> CommandResult:
@@ -42,6 +43,8 @@ class CheckM2Runner(ToolRunner):
         ]
         if database_path is not None:
             args.extend(["--database_path", database_path])
+        if extension is not None:
+            args.extend(["--extension", extension])
         if force:
             args.append("--force")
         return self.run(args, dry_run=dry_run)

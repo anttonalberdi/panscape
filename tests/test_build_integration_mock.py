@@ -7,7 +7,11 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from panscape.cli import app
-from panscape.commands.build import resolve_checkm2_db_path
+from panscape.commands.build import (
+    _looks_like_checkm2_multiprocessing_bug,
+    detect_fasta_extension,
+    resolve_checkm2_db_path,
+)
 
 runner = CliRunner()
 
@@ -157,3 +161,21 @@ def test_resolve_checkm2_db_path_returns_dmnd_file_for_both_inputs(tmp_path: Pat
 
     assert resolve_checkm2_db_path(db_dir) == dmnd_file
     assert resolve_checkm2_db_path(dmnd_file) == dmnd_file
+
+
+def test_detect_checkm2_multiprocessing_bug_patterns() -> None:
+    assert _looks_like_checkm2_multiprocessing_bug(
+        "AttributeError: 'Predictor' object has no attribute '__set_up_prodigal_thread'"
+    )
+    assert _looks_like_checkm2_multiprocessing_bug(
+        "AttributeError: 'Predictor' object has no attribute '__reportProgress'"
+    )
+    assert _looks_like_checkm2_multiprocessing_bug(
+        "ERROR: No protein files were generated in build/qc/checkm2/protein_files"
+    )
+    assert not _looks_like_checkm2_multiprocessing_bug("some other command failure")
+
+
+def test_detect_fasta_extension_for_checkm2() -> None:
+    assert detect_fasta_extension([Path("a.fna"), Path("b.fna.gz")]) == "fna"
+    assert detect_fasta_extension([Path("a.fa.gz"), Path("b.fa.gz"), Path("c.fna")]) == "fa.gz"
