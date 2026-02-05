@@ -31,6 +31,8 @@ class CommonConfig(BaseModel):
 
 class BuildConfig(CommonConfig):
     genomes_tsv: Path | None = None
+    genomes_path: Path | None = None
+    genomes_files: list[str] = Field(default_factory=list)
     run_checkm2: bool = False
     checkm2_db: Path | None = None
 

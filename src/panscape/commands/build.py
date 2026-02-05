@@ -157,6 +157,103 @@ def parse_genomes_manifest(genomes_tsv: Path) -> list[GenomeInput]:
     return sorted(genomes, key=lambda genome: genome.genome_id)
 
 
+def parse_genome_files_input(
+    *,
+    genomes_files: list[str],
+) -> list[GenomeInput]:
+    """Parse --genomes-files input as relative/absolute FASTA paths."""
+
+    if len(genomes_files) == 0:
+        raise PanScapeUsageError(
+            "No genome files were provided. Use --genomes-files with comma-separated FASTA paths."
+        )
+
+    base_dir = Path.cwd()
+
+    normalized_entries: list[str] = []
+    for raw_entry in genomes_files:
+        parts = [part.strip() for part in raw_entry.split(",")]
+        normalized_entries.extend([part for part in parts if part])
+
+    if len(normalized_entries) == 0:
+        raise PanScapeUsageError(
+            "No genome files were provided. Use --genomes-files with comma-separated FASTA paths."
+        )
+
+    resolved_paths: set[Path] = set()
+    for raw_entry in normalized_entries:
+        path = Path(raw_entry).expanduser()
+        if not path.is_absolute():
+            path = (base_dir / path).resolve()
+        resolved_paths.add(path)
+
+    return _build_genome_inputs_from_paths(sorted(resolved_paths, key=str))
+
+
+def _derive_genome_id_from_path(path: Path) -> str:
+    filename = path.name
+    lowered = filename.lower()
+    for suffix in sorted(FASTA_SUFFIXES, key=len, reverse=True):
+        if lowered.endswith(suffix):
+            genome_id = filename[: -len(suffix)]
+            if genome_id:
+                return genome_id
+    return path.stem
+
+
+def _build_genome_inputs_from_paths(paths: list[Path]) -> list[GenomeInput]:
+    observed_genome_ids: set[str] = set()
+    genomes: list[GenomeInput] = []
+
+    for path in paths:
+        validate_existing_file(path, f"Genome FASTA file ({path})")
+
+        lowered = path.name.lower()
+        if not any(lowered.endswith(suffix) for suffix in FASTA_SUFFIXES):
+            raise PanScapeUsageError(f"Unsupported FASTA extension for genome file: {path}")
+
+        genome_id = _derive_genome_id_from_path(path)
+        if genome_id in observed_genome_ids:
+            raise PanScapeUsageError(
+                f"Genome ID collision from input files: {genome_id}. "
+                "Rename files or use --genomes-tsv with explicit genome_id."
+            )
+        observed_genome_ids.add(genome_id)
+
+        genomes.append(
+            GenomeInput(
+                genome_id=genome_id,
+                fasta_path=path,
+                completeness=None,
+                contamination=None,
+            )
+        )
+
+    return sorted(genomes, key=lambda genome: genome.genome_id)
+
+
+def parse_genomes_path_input(genomes_path: Path) -> list[GenomeInput]:
+    """Auto-detect genome FASTA files inside --genomes-path."""
+
+    resolved_dir = genomes_path.expanduser().resolve()
+    if not resolved_dir.exists() or not resolved_dir.is_dir():
+        raise PanScapeUsageError(f"--genomes-path must be an existing directory: {genomes_path}")
+
+    detected_paths = [
+        path
+        for path in sorted(resolved_dir.iterdir(), key=lambda entry: entry.name)
+        if path.is_file() and any(path.name.lower().endswith(suffix) for suffix in FASTA_SUFFIXES)
+    ]
+
+    if len(detected_paths) == 0:
+        raise PanScapeUsageError(
+            f"No genome FASTA files were detected in --genomes-path: {resolved_dir}. "
+            "Expected extensions: .fna, .fa, .fasta and .gz variants."
+        )
+
+    return _build_genome_inputs_from_paths(detected_paths)
+
+
 def _format_optional_float(value: float | None, digits: int = 4) -> str:
     if value is None:
         return ""
@@ -462,6 +559,8 @@ def run_build(
     *,
     config_path: Path | None,
     genomes_tsv: Path | None,
+    genomes_path: Path | None,
+    genomes_files: str | None,
     outdir: Path | None,
     run_checkm2: bool | None,
     checkm2_db: Path | None,
@@ -497,6 +596,8 @@ def run_build(
             model_cls=BuildConfig,
             cli_overrides={
                 "genomes_tsv": genomes_tsv,
+                "genomes_path": genomes_path,
+                "genomes_files": [] if genomes_files is None else [genomes_files],
                 "outdir": outdir,
                 "run_checkm2": run_checkm2,
                 "checkm2_db": checkm2_db,
@@ -530,17 +631,41 @@ def run_build(
         configure_logging(verbose=cfg.verbose, quiet=cfg.quiet, log_file=cfg.log_file)
         logger = get_logger("panscape.build")
 
-        if cfg.genomes_tsv is None:
+        using_manifest = cfg.genomes_tsv is not None
+        using_file_list = len(cfg.genomes_files) > 0
+        using_path_autodetect = cfg.genomes_path is not None
+
+        selected_modes = sum([using_manifest, using_file_list, using_path_autodetect])
+        if selected_modes > 1:
             raise PanScapeUsageError(
-                "Missing genomes manifest. Provide --genomes-tsv or set build.genomes_tsv in config."
+                "--genomes-tsv, --genomes-files, and --genomes-path are mutually exclusive. "
+                "Provide exactly one."
             )
+        if selected_modes == 0:
+            raise PanScapeUsageError(
+                "Missing genome inputs. Provide exactly one of: --genomes-tsv, --genomes-files, --genomes-path."
+            )
+
         if cfg.checkm2_db is not None and not cfg.checkm2_db.exists():
             raise PanScapeUsageError(f"CheckM2 DB path does not exist: {cfg.checkm2_db}")
 
         if outdir is None and cfg.outdir == Path("panscape_out") and config_path is None:
             raise PanScapeUsageError("Missing output directory. Provide --outdir or set build.outdir in config.")
 
-        genomes = parse_genomes_manifest(cfg.genomes_tsv)
+        if using_manifest:
+            assert cfg.genomes_tsv is not None
+            genomes = parse_genomes_manifest(cfg.genomes_tsv)
+            manifest_input_paths: list[Path] = [cfg.genomes_tsv]
+        elif using_file_list:
+            genomes = parse_genome_files_input(
+                genomes_files=cfg.genomes_files,
+            )
+            manifest_input_paths = sorted((genome.fasta_path for genome in genomes), key=str)
+        else:
+            assert cfg.genomes_path is not None
+            genomes = parse_genomes_path_input(cfg.genomes_path)
+            manifest_input_paths = sorted((genome.fasta_path for genome in genomes), key=str)
+
         if len(genomes) == 0:
             raise PanScapeUsageError("No genomes available for build.")
 
@@ -605,7 +730,7 @@ def run_build(
                 tool_versions["checkm2"] = "not-used"
 
         step_plan = [
-            "Parse and validate genomes.tsv",
+            "Parse and validate genome inputs",
             "Normalize FASTA headers and compute assembly stats",
             "Compute genome QC (input values and optional CheckM2)",
             "Run Mash preclustering",
@@ -626,7 +751,7 @@ def run_build(
             dry_run=cfg.dry_run,
             threads=cfg.threads,
             config_path=config_path,
-            input_paths=[cfg.genomes_tsv],
+            input_paths=manifest_input_paths,
             planned_steps=step_plan,
             parameters=cfg.model_dump(mode="json"),
             tool_versions=tool_versions,
@@ -1441,6 +1566,19 @@ def build_callback(
         "--genomes-tsv",
         help="Genome manifest TSV with columns: genome_id, fasta_path, completeness, contamination.",
     ),
+    genomes_path: Path | None = typer.Option(
+        None,
+        "--genomes-path",
+        help=(
+            "Directory containing genome FASTAs for auto-detection "
+            "(.fna/.fa/.fasta and .gz variants)."
+        ),
+    ),
+    genomes_files: str | None = typer.Option(
+        None,
+        "--genomes-files",
+        help="Comma-separated relative or absolute genome FASTA file paths (alternative to --genomes-tsv).",
+    ),
     outdir: Path | None = typer.Option(None, "--outdir", help="Output root directory."),
     run_checkm2: bool | None = typer.Option(
         None,
@@ -1487,6 +1625,8 @@ def build_callback(
     exit_code = run_build(
         config_path=config,
         genomes_tsv=genomes_tsv,
+        genomes_path=genomes_path,
+        genomes_files=genomes_files,
         outdir=outdir,
         run_checkm2=run_checkm2,
         checkm2_db=checkm2_db,
