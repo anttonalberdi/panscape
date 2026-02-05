@@ -821,6 +821,7 @@ def run_build(
                     output_dir=checkm2_dir,
                     threads=cfg.threads,
                     database_path=cfg.checkm2_db,
+                    force=cfg.force,
                     dry_run=cfg.dry_run,
                 )
                 report_path = _find_checkm2_report(checkm2_dir)

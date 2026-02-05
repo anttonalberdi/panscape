@@ -4,7 +4,7 @@ import typer
 from rich.console import Console
 
 from panscape import __version__
-from panscape.commands import build, map, species, strain
+from panscape.commands import build, map, species, strain, update
 
 console = Console()
 
@@ -22,6 +22,7 @@ app.add_typer(build.app, name="build", help="Build species clusters and pangenom
 app.add_typer(map.app, name="map", help="Map reads to species references.")
 app.add_typer(species.app, name="species", help="Create species-level mapping artifacts.")
 app.add_typer(strain.app, name="strain", help="Run strain deconvolution entrypoint.")
+app.add_typer(update.app, name="update", help="Update PanScape from GitHub.")
 
 
 @app.callback()

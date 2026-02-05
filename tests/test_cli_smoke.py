@@ -18,6 +18,7 @@ def test_root_help_smoke() -> None:
     assert "map" in result.stdout
     assert "species" in result.stdout
     assert "strain" in result.stdout
+    assert "update" in result.stdout
 
 
 def test_build_dry_run_writes_manifest(tmp_path: Path) -> None:
@@ -190,3 +191,8 @@ def test_map_dry_run_writes_manifest(tmp_path: Path) -> None:
     assert manifest["command"] == "map"
     assert manifest["status"] == "dry-run"
     assert not list((outdir / "map").glob("**/*.bam"))
+
+
+def test_update_dry_run_smoke() -> None:
+    result = runner.invoke(app, ["update", "--dry-run"])
+    assert result.exit_code == 0
