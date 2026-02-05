@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Mapping, TypeVar
+from typing import Any, Literal, Mapping, TypeVar
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, ValidationError, model_validator
@@ -61,6 +61,7 @@ class BuildConfig(CommonConfig):
     keep_singletons: bool = True
     mock: bool = False
 
+    species_representation: Literal["best", "consensus", "medoid"] = "best"
     strain_ok_min_mappability: float = Field(default=0.2, ge=0.0, le=1.0)
 
     @model_validator(mode="after")

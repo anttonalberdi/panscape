@@ -9,17 +9,27 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Literal
 
 import typer
 from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from panscape.build.derep import DerepGene, DerepGroup, dereplicate_family
-from panscape.build.fasta import AssemblyStats, FastaRecord, normalize_fasta_file, write_fasta_records
+from panscape.build.fasta import (
+    AssemblyStats,
+    FastaRecord,
+    compute_assembly_stats,
+    normalize_fasta_file,
+    write_fasta_records,
+)
 from panscape.build.gene_calling import CalledGene, call_genes, write_gene_outputs
 from panscape.build.graph import connected_components
 from panscape.build.kmer import mock_mash_distance, unique_kmer_fractions
+from panscape.build.representation import (
+    build_consensus_dereplicated_records,
+    select_medoid_genome,
+)
 from panscape.build.scoring import backbone_score
 from panscape.config import BuildConfig, merge_command_config
 from panscape.exceptions import PanScapeError, PanScapeUsageError
@@ -70,7 +80,17 @@ class FamilyCluster:
     member_gene_ids: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class SpeciesComponentSelection:
+    component: tuple[str, ...]
+    anchor_genome_id: str
+    source_genome_id: str | None
+    scores_by_genome: dict[str, float]
+
+
 CHECKM2_DMND_FILENAME = "uniref100.KO.1.dmnd"
+SpeciesRepresentationMode = Literal["best", "consensus", "medoid"]
+CHECKM2_WORKAROUND_MIN_GENE_LEN = 90
 
 
 def _parse_optional_float(raw_value: str, *, field_name: str, row_number: int) -> float | None:
@@ -318,6 +338,61 @@ def _looks_like_checkm2_multiprocessing_bug(error_text: str) -> bool:
     return any(marker in lowered for marker in markers)
 
 
+def _prepare_checkm2_gene_inputs(
+    genome_ids: Iterable[str],
+    *,
+    contexts: dict[str, GenomeContext],
+    output_dir: Path,
+    force: bool,
+    threads: int,
+) -> list[Path]:
+    """Generate per-genome protein FASTAs for CheckM2 `--genes` mode.
+
+    This is a workaround for CheckM2 multiprocessing failures observed on
+    Python 3.12+ environments when CheckM2 runs its internal prodigal step.
+    """
+
+    ensure_dir(output_dir)
+    target_ids = sorted(set(genome_ids))
+
+    def _write_one(genome_id: str) -> Path:
+        context = contexts[genome_id]
+        genes = call_genes(
+            genome_id=genome_id,
+            records=context.normalized_records,
+            min_gene_len=CHECKM2_WORKAROUND_MIN_GENE_LEN,
+            mock=False,
+        )
+        if len(genes) == 0:
+            genes = call_genes(
+                genome_id=genome_id,
+                records=context.normalized_records,
+                min_gene_len=30,
+                mock=False,
+            )
+
+        aa_records = [
+            FastaRecord(header=gene.gene_id, sequence=gene.aa_sequence or "X")
+            for gene in genes
+        ]
+        if len(aa_records) == 0:
+            # Keep CheckM2 input schema valid even for tiny assemblies.
+            aa_records = [FastaRecord(header=f"{genome_id}_gene_000000", sequence="M")]
+
+        path = output_dir / f"{genome_id}.faa"
+        write_fasta_records(path, aa_records, force=force)
+        return path
+
+    output_paths: list[Path] = []
+    max_workers = max(1, min(threads, len(target_ids)))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(_write_one, genome_id) for genome_id in target_ids]
+        for future in as_completed(futures):
+            output_paths.append(future.result())
+
+    return sorted(output_paths, key=lambda path: path.name)
+
+
 def _format_optional_float(value: float | None, digits: int = 4) -> str:
     if value is None:
         return ""
@@ -431,6 +506,51 @@ def _select_backbone(
 
     backbone_genome_id = sorted(scores, key=lambda gid: (-scores[gid], gid))[0]
     return backbone_genome_id, scores
+
+
+def _select_species_component_representation(
+    component: Iterable[str],
+    *,
+    mode: SpeciesRepresentationMode,
+    stats_by_genome: dict[str, AssemblyStats],
+    qc_by_genome: dict[str, GenomeQC],
+    ani_scores: dict[tuple[str, str], float],
+) -> SpeciesComponentSelection:
+    component_tuple = tuple(sorted(component))
+    best_genome_id, scores = _select_backbone(
+        component_tuple,
+        stats_by_genome=stats_by_genome,
+        qc_by_genome=qc_by_genome,
+        logger_name="panscape.build.backbone",
+    )
+
+    if mode == "best":
+        return SpeciesComponentSelection(
+            component=component_tuple,
+            anchor_genome_id=best_genome_id,
+            source_genome_id=best_genome_id,
+            scores_by_genome=scores,
+        )
+
+    if mode == "consensus":
+        return SpeciesComponentSelection(
+            component=component_tuple,
+            anchor_genome_id=best_genome_id,
+            source_genome_id=None,
+            scores_by_genome=scores,
+        )
+
+    medoid_id = select_medoid_genome(
+        component_tuple,
+        ani_by_pair=ani_scores,
+        quality_scores=scores,
+    )
+    return SpeciesComponentSelection(
+        component=component_tuple,
+        anchor_genome_id=medoid_id,
+        source_genome_id=medoid_id,
+        scores_by_genome=scores,
+    )
 
 
 def _mock_checkm2_predictions(contexts: dict[str, GenomeContext]) -> dict[str, tuple[float, float]]:
@@ -626,6 +746,7 @@ def run_build(
     genomes_path: Path | None,
     genomes_files: str | None,
     outdir: Path | None,
+    species_representation: str | None,
     run_checkm2: bool | None,
     checkm2_db: Path | None,
     min_completeness: float | None,
@@ -663,6 +784,7 @@ def run_build(
                 "genomes_path": genomes_path,
                 "genomes_files": [] if genomes_files is None else [genomes_files],
                 "outdir": outdir,
+                "species_representation": species_representation,
                 "run_checkm2": run_checkm2,
                 "checkm2_db": checkm2_db,
                 "min_completeness": min_completeness,
@@ -709,6 +831,8 @@ def run_build(
             raise PanScapeUsageError(
                 "Missing genome inputs. Provide exactly one of: --genomes-tsv, --genomes-files, --genomes-path."
             )
+
+        species_representation_mode: SpeciesRepresentationMode = cfg.species_representation
 
         resolved_checkm2_db: Path | None = None
         if cfg.checkm2_db is not None:
@@ -798,7 +922,10 @@ def run_build(
             "Run Mash preclustering",
             "Run skani ANI edges for species/strain thresholds",
             "Build deterministic species and strain clusters",
-            "Select species backbone genomes and write backbone FASTAs",
+            (
+                "Create species reference FASTAs "
+                f"(mode: {species_representation_mode}) and assign anchor genomes"
+            ),
             "Call genes per genome using pyrodigal (or mock caller)",
             "Cluster proteins into gene families via mmseqs2 (or mock clustering)",
             "Compute prevalence tiers and within-family dereplication",
@@ -895,17 +1022,28 @@ def run_build(
                         dry_run=cfg.dry_run,
                     )
                 except CommandExecutionError as exc:
-                    if cfg.threads > 1 and _looks_like_checkm2_multiprocessing_bug(str(exc)):
+                    if _looks_like_checkm2_multiprocessing_bug(str(exc)):
                         logger.warning(
-                            "CheckM2 multiprocessing issue detected; retrying with --threads 1. "
-                            "This is a known CheckM2/Python compatibility workaround."
+                            "CheckM2 internal gene-calling multiprocessing bug detected. "
+                            "Falling back to pyrodigal precomputed proteins with "
+                            "CheckM2 --genes mode (threads=%s).",
+                            cfg.threads,
+                        )
+                        checkm2_genes_dir = ensure_dir(qc_dir / "checkm2_input_genes")
+                        _prepare_checkm2_gene_inputs(
+                            missing_qc_ids,
+                            contexts=contexts,
+                            output_dir=checkm2_genes_dir,
+                            force=True,
+                            threads=cfg.threads,
                         )
                         checkm2_runner.predict(
-                            input_dir=normalized_dir,
+                            input_dir=checkm2_genes_dir,
                             output_dir=checkm2_dir,
-                            threads=1,
+                            threads=cfg.threads,
                             database_path=resolved_checkm2_db,
-                            extension=checkm2_extension,
+                            genes=True,
+                            extension="faa",
                             force=True,
                             dry_run=cfg.dry_run,
                         )
@@ -1132,7 +1270,7 @@ def run_build(
         )
         output_paths.extend([species_edges_path, strain_edges_path])
 
-        # Step 7 + 8: species/strain components and backbones
+        # Step 7 + 8: species/strain components and per-species references
         species_components = connected_components(
             kept_genomes,
             [(row[1], row[2]) for row in species_edge_rows],
@@ -1140,27 +1278,33 @@ def run_build(
 
         stats_by_genome = {genome_id: contexts[genome_id].assembly_stats for genome_id in kept_genomes}
 
-        component_backbone_info: list[tuple[tuple[str, ...], str, dict[str, float]]] = []
+        component_selections: list[SpeciesComponentSelection] = []
         for component in species_components:
-            backbone_genome_id, scores = _select_backbone(
-                component,
-                stats_by_genome=stats_by_genome,
-                qc_by_genome=qc_by_genome,
-                logger_name="panscape.build.backbone",
+            component_selections.append(
+                _select_species_component_representation(
+                    component,
+                    mode=species_representation_mode,
+                    stats_by_genome=stats_by_genome,
+                    qc_by_genome=qc_by_genome,
+                    ani_scores=ani_scores,
+                )
             )
-            component_backbone_info.append((tuple(component), backbone_genome_id, scores))
 
-        component_backbone_info.sort(key=lambda item: (item[1], item[0]))
+        component_selections.sort(key=lambda item: (item.anchor_genome_id, item.component))
 
         species_by_component: dict[tuple[str, ...], str] = {}
         component_scores: dict[tuple[str, ...], dict[str, float]] = {}
         backbone_by_species: dict[str, str] = {}
+        source_genome_by_species: dict[str, str | None] = {}
+        species_representation_by_species: dict[str, SpeciesRepresentationMode] = {}
 
-        for idx, (component, backbone_genome_id, scores) in enumerate(component_backbone_info, start=1):
+        for idx, selection in enumerate(component_selections, start=1):
             species_id = f"species_{idx:06d}"
-            species_by_component[component] = species_id
-            component_scores[component] = scores
-            backbone_by_species[species_id] = backbone_genome_id
+            species_by_component[selection.component] = species_id
+            component_scores[selection.component] = selection.scores_by_genome
+            backbone_by_species[species_id] = selection.anchor_genome_id
+            source_genome_by_species[species_id] = selection.source_genome_id
+            species_representation_by_species[species_id] = species_representation_mode
 
         species_members: dict[str, tuple[str, ...]] = {
             species_by_component[component]: component
@@ -1169,13 +1313,13 @@ def run_build(
 
         species_cluster_rows: list[list[str]] = []
         for species_id, genomes_in_species in sorted(species_members.items()):
-            backbone_id = backbone_by_species[species_id]
+            anchor_id = backbone_by_species[species_id]
             for genome_id in genomes_in_species:
                 species_cluster_rows.append(
                     [
                         species_id,
                         genome_id,
-                        "1" if genome_id == backbone_id else "0",
+                        "1" if genome_id == anchor_id else "0",
                     ]
                 )
 
@@ -1215,39 +1359,87 @@ def run_build(
 
         backbone_rows: list[list[str]] = []
         for species_id, genomes_in_species in sorted(species_members.items()):
-            backbone_id = backbone_by_species[species_id]
+            anchor_id = backbone_by_species[species_id]
+            source_genome_id = source_genome_by_species[species_id]
+            representation_mode = species_representation_by_species[species_id]
             component = tuple(genomes_in_species)
-            score = component_scores[component][backbone_id]
-            qc = qc_by_genome[backbone_id]
-            stats = stats_by_genome[backbone_id]
+            score = component_scores[component][anchor_id]
 
+            backbone_fasta_path = backbones_dir / f"{species_id}.fna"
+            reference_records: list[FastaRecord]
+
+            if representation_mode == "consensus":
+                # TODO: replace the contig-level derep consensus with an alignment-aware
+                # consensus caller once whole-genome multi-alignment is integrated.
+                reference_records = build_consensus_dereplicated_records(
+                    records_by_genome={
+                        genome_id: contexts[genome_id].normalized_records for genome_id in genomes_in_species
+                    },
+                    genome_ids=genomes_in_species,
+                    quality_scores=component_scores[component],
+                    anchor_genome_id=anchor_id,
+                    derep_identity=cfg.within_family_derep_nt,
+                    k=max(15, min(31, cfg.mappability_k)),
+                )
+                if len(reference_records) == 0:
+                    logger.warning(
+                        "Consensus derep produced no contigs for %s; falling back to anchor genome %s.",
+                        species_id,
+                        anchor_id,
+                    )
+                    reference_records = contexts[anchor_id].normalized_records
+
+                species_named_records = [
+                    FastaRecord(
+                        header=f"{species_id}_contig_{idx:06d}",
+                        sequence=record.sequence,
+                    )
+                    for idx, record in enumerate(reference_records, start=1)
+                ]
+                write_fasta_records(
+                    backbone_fasta_path,
+                    species_named_records,
+                    force=cfg.force,
+                )
+                output_paths.append(backbone_fasta_path)
+                reference_stats = compute_assembly_stats(species_named_records)
+            else:
+                if source_genome_id is None:
+                    raise PanScapeUsageError(
+                        f"Missing source genome for representation mode {representation_mode}: {species_id}"
+                    )
+                output_paths.append(
+                    _copy_file(
+                        contexts[source_genome_id].normalized_fasta,
+                        backbone_fasta_path,
+                        force=cfg.force,
+                    )
+                )
+                reference_stats = stats_by_genome[source_genome_id]
+
+            qc = qc_by_genome[anchor_id]
             backbone_rows.append(
                 [
                     species_id,
-                    backbone_id,
+                    representation_mode,
+                    anchor_id,
+                    source_genome_id or "",
                     f"{score:.6f}",
                     _format_optional_float(qc.completeness, digits=3),
                     _format_optional_float(qc.contamination, digits=3),
-                    str(stats.n50),
-                    str(stats.genome_size),
-                    str(stats.contig_count),
+                    str(reference_stats.n50),
+                    str(reference_stats.genome_size),
+                    str(reference_stats.contig_count),
                 ]
-            )
-
-            backbone_fasta_path = backbones_dir / f"{species_id}.fna"
-            output_paths.append(
-                _copy_file(
-                    contexts[backbone_id].normalized_fasta,
-                    backbone_fasta_path,
-                    force=cfg.force,
-                )
             )
 
         backbone_table_path = write_tsv(
             backbones_dir / "backbone_table.tsv",
             [
                 "species_id",
+                "representation_mode",
                 "backbone_genome_id",
+                "source_genome_id",
                 "backbone_score",
                 "completeness",
                 "contamination",
@@ -1611,6 +1803,9 @@ def run_build(
 
             index_plan = {
                 "species_id": species_id,
+                "representation_mode": species_representation_by_species[species_id],
+                "anchor_genome_id": backbone_by_species[species_id],
+                "source_genome_id": source_genome_by_species[species_id],
                 "backbone_fasta": str(backbones_dir / f"{species_id}.fna"),
                 "genes_fna": str(genes_fna_path),
                 "genes_faa": str(genes_faa_path),
@@ -1665,6 +1860,15 @@ def build_callback(
         help="Comma-separated relative or absolute genome FASTA file paths (alternative to --genomes-tsv).",
     ),
     outdir: Path | None = typer.Option(None, "--outdir", help="Output root directory."),
+    species_representation: str | None = typer.Option(
+        None,
+        "--species-representation",
+        help=(
+            "Species reference mode: "
+            "best (highest backbone score), consensus (dereplicated consensus), "
+            "or medoid (highest mean ANI)."
+        ),
+    ),
     run_checkm2: bool | None = typer.Option(
         None,
         "--run-checkm2/--no-run-checkm2",
@@ -1720,6 +1924,7 @@ def build_callback(
         genomes_path=genomes_path,
         genomes_files=genomes_files,
         outdir=outdir,
+        species_representation=species_representation,
         run_checkm2=run_checkm2,
         checkm2_db=checkm2_db,
         min_completeness=min_completeness,

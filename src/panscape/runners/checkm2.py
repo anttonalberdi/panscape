@@ -24,26 +24,44 @@ class CheckM2Runner(ToolRunner):
     def predict(
         self,
         *,
-        input_dir: Path,
+        input_dir: Path | None = None,
+        input_paths: list[Path] | None = None,
         output_dir: Path,
         threads: int,
         database_path: Path | None,
+        genes: bool = False,
         extension: str | None = None,
         force: bool = False,
         dry_run: bool = False,
     ) -> CommandResult:
+        if (input_dir is None) == (input_paths is None):
+            raise ValueError("Provide exactly one of `input_dir` or `input_paths`.")
+        if input_paths is not None and len(input_paths) == 0:
+            raise ValueError("`input_paths` cannot be empty.")
+
         args: list[str | Path] = [
             "predict",
             "--input",
-            input_dir,
-            "--output-directory",
-            output_dir,
-            "--threads",
-            str(threads),
         ]
+        if input_paths is not None:
+            args.extend(input_paths)
+        else:
+            assert input_dir is not None
+            args.append(input_dir)
+
+        args.extend(
+            [
+                "--output-directory",
+                output_dir,
+                "--threads",
+                str(threads),
+            ]
+        )
+        if genes:
+            args.append("--genes")
         if database_path is not None:
             args.extend(["--database_path", database_path])
-        if extension is not None:
+        if extension is not None and input_paths is None:
             args.extend(["--extension", extension])
         if force:
             args.append("--force")

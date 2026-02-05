@@ -179,3 +179,78 @@ def test_detect_checkm2_multiprocessing_bug_patterns() -> None:
 def test_detect_fasta_extension_for_checkm2() -> None:
     assert detect_fasta_extension([Path("a.fna"), Path("b.fna.gz")]) == "fna"
     assert detect_fasta_extension([Path("a.fa.gz"), Path("b.fa.gz"), Path("c.fna")]) == "fa.gz"
+
+
+def test_build_mock_consensus_representation_outputs_consensus_backbones(tmp_path: Path) -> None:
+    data_dir = Path(__file__).parent / "data"
+    genomes_tsv = data_dir / "genomes.tsv"
+    outdir = tmp_path / "build_run_consensus"
+
+    result = runner.invoke(
+        app,
+        [
+            "build",
+            "--mock",
+            "--species-representation",
+            "consensus",
+            "--genomes-tsv",
+            str(genomes_tsv),
+            "--outdir",
+            str(outdir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+
+    backbone_table_path = outdir / "build" / "backbones" / "backbone_table.tsv"
+    with backbone_table_path.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle, delimiter="\t"))
+
+    assert rows
+    for row in rows:
+        assert row["representation_mode"] == "consensus"
+        assert row["source_genome_id"] == ""
+        species_id = row["species_id"]
+        backbone_fasta = outdir / "build" / "backbones" / f"{species_id}.fna"
+        assert backbone_fasta.exists()
+        first_header = backbone_fasta.read_text(encoding="utf-8").splitlines()[0]
+        assert first_header.startswith(f">{species_id}_contig_")
+
+        index_plan = json.loads(
+            (outdir / "build" / "pangenomes" / species_id / "index" / "INDEX_PLAN.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert index_plan["representation_mode"] == "consensus"
+        assert index_plan["anchor_genome_id"] == row["backbone_genome_id"]
+        assert index_plan["source_genome_id"] is None
+
+
+def test_build_mock_medoid_representation_sets_source_genome(tmp_path: Path) -> None:
+    data_dir = Path(__file__).parent / "data"
+    genomes_tsv = data_dir / "genomes.tsv"
+    outdir = tmp_path / "build_run_medoid"
+
+    result = runner.invoke(
+        app,
+        [
+            "build",
+            "--mock",
+            "--species-representation",
+            "medoid",
+            "--genomes-tsv",
+            str(genomes_tsv),
+            "--outdir",
+            str(outdir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+
+    with (outdir / "build" / "backbones" / "backbone_table.tsv").open(
+        "r", encoding="utf-8", newline=""
+    ) as handle:
+        rows = list(csv.DictReader(handle, delimiter="\t"))
+    assert rows
+    assert all(row["representation_mode"] == "medoid" for row in rows)
+    assert all(row["source_genome_id"] != "" for row in rows)

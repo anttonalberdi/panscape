@@ -163,6 +163,29 @@ def test_build_dry_run_with_genomes_path_autodetects_fasta_and_gz(tmp_path: Path
     assert any(path.endswith("auto2.fa.gz") for path in manifest["input_paths"])
 
 
+def test_build_rejects_unsupported_species_representation(tmp_path: Path) -> None:
+    fasta_path = tmp_path / "g1.fna"
+    fasta_path.write_text(">g1\nACGTACGT\n", encoding="utf-8")
+    genomes_tsv = tmp_path / "genomes.tsv"
+    genomes_tsv.write_text("genome_id\tfasta_path\ng1\tg1.fna\n", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "build",
+            "--mock",
+            "--genomes-tsv",
+            str(genomes_tsv),
+            "--species-representation",
+            "strain-medoids",
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "species_representation" in result.stdout
+
+
 def test_map_dry_run_writes_manifest(tmp_path: Path) -> None:
     r1 = tmp_path / "sample1_R1.fastq"
     r1.write_text("@r1\nACGT\n+\n####\n", encoding="utf-8")
