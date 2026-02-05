@@ -7,10 +7,10 @@ from panscape.runners.base import ToolRunner
 from panscape.utils.subprocess import CommandResult
 
 
-class MMseqsRunner(ToolRunner):
-    """Wrapper around mmseqs2 clustering commands."""
+class MashRunner(ToolRunner):
+    """Wrapper around Mash commands used by `panscape build`."""
 
-    def __init__(self, executable: str = "mmseqs") -> None:
+    def __init__(self, executable: str = "mash") -> None:
         super().__init__(executable)
 
     def is_available(self) -> bool:
@@ -21,30 +21,28 @@ class MMseqsRunner(ToolRunner):
         version_line = result.stdout.strip() or result.stderr.strip()
         return version_line or "unknown"
 
-    def easy_cluster(
+    def sketch(
         self,
         *,
-        input_faa: Path,
-        output_prefix: Path,
-        tmp_dir: Path,
-        min_seq_id: float,
-        coverage: float,
-        threads: int,
+        input_fastas: list[Path],
+        out_prefix: Path,
+        kmer_size: int,
+        sketch_size: int,
         dry_run: bool = False,
     ) -> CommandResult:
-        # TODO: expose additional mmseqs parameters once empirical defaults are benchmarked.
         return self.run(
             [
-                "easy-cluster",
-                str(input_faa),
-                str(output_prefix),
-                str(tmp_dir),
-                "--min-seq-id",
-                str(min_seq_id),
-                "-c",
-                str(coverage),
-                "--threads",
-                str(threads),
+                "sketch",
+                "-k",
+                str(kmer_size),
+                "-s",
+                str(sketch_size),
+                "-o",
+                str(out_prefix),
+                *[str(path) for path in input_fastas],
             ],
             dry_run=dry_run,
         )
+
+    def dist(self, *, sketch_path: Path, dry_run: bool = False) -> CommandResult:
+        return self.run(["dist", str(sketch_path), str(sketch_path)], dry_run=dry_run)

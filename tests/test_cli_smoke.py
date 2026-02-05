@@ -31,6 +31,7 @@ def test_build_dry_run_writes_manifest(tmp_path: Path) -> None:
         app,
         [
             "build",
+            "--mock",
             "--genomes-tsv",
             str(genomes_tsv),
             "--outdir",

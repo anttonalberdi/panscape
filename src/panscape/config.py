@@ -31,6 +31,41 @@ class CommonConfig(BaseModel):
 
 class BuildConfig(CommonConfig):
     genomes_tsv: Path | None = None
+    run_checkm2: bool = False
+    checkm2_db: Path | None = None
+
+    min_completeness: float = Field(default=70.0, ge=0.0, le=100.0)
+    max_contamination: float = Field(default=10.0, ge=0.0, le=100.0)
+
+    mash_sketch_size: PositiveInt = 10000
+    mash_k: PositiveInt = 21
+    mash_threshold: float = Field(default=0.10, ge=0.0, le=1.0)
+
+    species_ani: float = Field(default=0.95, ge=0.0, le=1.0)
+    strain_ani: float = Field(default=0.995, ge=0.0, le=1.0)
+
+    mmseqs_min_aa_id: float = Field(default=0.9, ge=0.0, le=1.0)
+    mmseqs_cov: float = Field(default=0.8, ge=0.0, le=1.0)
+
+    within_family_derep_nt: float = Field(default=0.995, ge=0.0, le=1.0)
+    mappability_k: PositiveInt = 31
+    min_gene_len: PositiveInt = 300
+
+    rare_min_prevalence: PositiveInt = 2
+    use_high_quality_for_prevalence: bool = True
+    hq_min_completeness: float = Field(default=90.0, ge=0.0, le=100.0)
+    hq_max_contamination: float = Field(default=5.0, ge=0.0, le=100.0)
+
+    keep_singletons: bool = True
+    mock: bool = False
+
+    strain_ok_min_mappability: float = Field(default=0.2, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _validate_threshold_relationships(self) -> "BuildConfig":
+        if self.strain_ani < self.species_ani:
+            raise ValueError("`strain_ani` must be >= `species_ani`.")
+        return self
 
 
 class MapConfig(CommonConfig):

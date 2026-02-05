@@ -1,0 +1,4 @@
+genome_id	fasta_path	completeness	contamination
+g1	genomes/g1.fna	96	1.5
+g2	genomes/g2.fna	93	2.0
+g3	genomes/g3.fna	88	4.0

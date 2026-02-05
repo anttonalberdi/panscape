@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
 from panscape import __version__
 
@@ -29,6 +29,8 @@ class RunManifest:
     input_paths: list[str]
     output_paths: list[str] = field(default_factory=list)
     planned_steps: list[str] = field(default_factory=list)
+    parameters: dict[str, Any] = field(default_factory=dict)
+    tool_versions: dict[str, str] = field(default_factory=dict)
 
 
 def _utcnow_iso() -> str:
@@ -66,6 +68,8 @@ def create_run_manifest(
     config_path: Path | None,
     input_paths: Sequence[Path],
     planned_steps: Sequence[str],
+    parameters: Mapping[str, Any] | None = None,
+    tool_versions: Mapping[str, str] | None = None,
 ) -> RunManifest:
     return RunManifest(
         command=command,
@@ -88,6 +92,8 @@ def create_run_manifest(
         },
         input_paths=[str(path) for path in input_paths],
         planned_steps=list(planned_steps),
+        parameters=dict(parameters or {}),
+        tool_versions=dict(tool_versions or {}),
     )
 
 
