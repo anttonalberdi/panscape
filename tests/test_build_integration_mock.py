@@ -7,6 +7,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from panscape.cli import app
+from panscape.commands.build import resolve_checkm2_db_path
 
 runner = CliRunner()
 
@@ -102,3 +103,57 @@ def test_build_mock_defaults_to_checkm2_when_qc_missing(tmp_path: Path) -> None:
 
     assert rows
     assert all(row["qc_source"] == "checkm2" for row in rows)
+
+
+def test_build_mock_accepts_checkm2_db_directory_or_dmnd_file(tmp_path: Path) -> None:
+    g1 = tmp_path / "g1.fna"
+    g2 = tmp_path / "g2.fna"
+    g1.write_text(">g1\nACGTACGTACGTACGTACGTACGT\n", encoding="utf-8")
+    g2.write_text(">g2\nACGTACGTACGTACGTACGTACGA\n", encoding="utf-8")
+
+    db_dir = tmp_path / "checkm2_db"
+    db_dir.mkdir()
+    dmnd_file = db_dir / "uniref100.KO.1.dmnd"
+    dmnd_file.write_text("placeholder", encoding="utf-8")
+
+    outdir_dir_mode = tmp_path / "build_run_db_dir"
+    result_dir_mode = runner.invoke(
+        app,
+        [
+            "build",
+            "--mock",
+            "--genomes-files",
+            f"{g1},{g2}",
+            "--checkm2-db",
+            str(db_dir),
+            "--outdir",
+            str(outdir_dir_mode),
+        ],
+    )
+    assert result_dir_mode.exit_code == 0, result_dir_mode.stdout
+
+    outdir_file_mode = tmp_path / "build_run_db_file"
+    result_file_mode = runner.invoke(
+        app,
+        [
+            "build",
+            "--mock",
+            "--genomes-files",
+            f"{g1},{g2}",
+            "--checkm2-db",
+            str(dmnd_file),
+            "--outdir",
+            str(outdir_file_mode),
+        ],
+    )
+    assert result_file_mode.exit_code == 0, result_file_mode.stdout
+
+
+def test_resolve_checkm2_db_path_returns_dmnd_file_for_both_inputs(tmp_path: Path) -> None:
+    db_dir = tmp_path / "checkm2_db"
+    db_dir.mkdir()
+    dmnd_file = db_dir / "uniref100.KO.1.dmnd"
+    dmnd_file.write_text("placeholder", encoding="utf-8")
+
+    assert resolve_checkm2_db_path(db_dir) == dmnd_file
+    assert resolve_checkm2_db_path(dmnd_file) == dmnd_file

@@ -69,6 +69,9 @@ class FamilyCluster:
     member_gene_ids: tuple[str, ...]
 
 
+CHECKM2_DMND_FILENAME = "uniref100.KO.1.dmnd"
+
+
 def _parse_optional_float(raw_value: str, *, field_name: str, row_number: int) -> float | None:
     value = raw_value.strip()
     if value == "":
@@ -252,6 +255,33 @@ def parse_genomes_path_input(genomes_path: Path) -> list[GenomeInput]:
         )
 
     return _build_genome_inputs_from_paths(detected_paths)
+
+
+def resolve_checkm2_db_path(checkm2_db: Path) -> Path:
+    """Resolve --checkm2-db to the full uniref100.KO.1.dmnd file path."""
+
+    resolved = checkm2_db.expanduser().resolve()
+    if not resolved.exists():
+        raise PanScapeUsageError(f"CheckM2 DB path does not exist: {checkm2_db}")
+
+    if resolved.is_file():
+        if resolved.name != CHECKM2_DMND_FILENAME:
+            raise PanScapeUsageError(
+                "--checkm2-db file path must point to "
+                f"`{CHECKM2_DMND_FILENAME}`. Received: {resolved}"
+            )
+        return resolved
+
+    if not resolved.is_dir():
+        raise PanScapeUsageError(f"Invalid CheckM2 DB path (not file/dir): {resolved}")
+
+    dmnd_path = resolved / CHECKM2_DMND_FILENAME
+    if not dmnd_path.exists() or not dmnd_path.is_file():
+        raise PanScapeUsageError(
+            "--checkm2-db directory must contain "
+            f"`{CHECKM2_DMND_FILENAME}`. Missing in: {resolved}"
+        )
+    return dmnd_path
 
 
 def _format_optional_float(value: float | None, digits: int = 4) -> str:
@@ -646,8 +676,9 @@ def run_build(
                 "Missing genome inputs. Provide exactly one of: --genomes-tsv, --genomes-files, --genomes-path."
             )
 
-        if cfg.checkm2_db is not None and not cfg.checkm2_db.exists():
-            raise PanScapeUsageError(f"CheckM2 DB path does not exist: {cfg.checkm2_db}")
+        resolved_checkm2_db: Path | None = None
+        if cfg.checkm2_db is not None:
+            resolved_checkm2_db = resolve_checkm2_db_path(cfg.checkm2_db)
 
         if using_manifest:
             assert cfg.genomes_tsv is not None
@@ -820,7 +851,7 @@ def run_build(
                     input_dir=normalized_dir,
                     output_dir=checkm2_dir,
                     threads=cfg.threads,
-                    database_path=cfg.checkm2_db,
+                    database_path=resolved_checkm2_db,
                     force=cfg.force,
                     dry_run=cfg.dry_run,
                 )
@@ -1583,7 +1614,14 @@ def build_callback(
         "--run-checkm2/--no-run-checkm2",
         help="Run CheckM2 for genomes missing completeness/contamination.",
     ),
-    checkm2_db: Path | None = typer.Option(None, "--checkm2-db", help="Optional CheckM2 DB path."),
+    checkm2_db: Path | None = typer.Option(
+        None,
+        "--checkm2-db",
+        help=(
+            "Optional CheckM2 database path: either the directory containing "
+            "`uniref100.KO.1.dmnd` or the full path to that file."
+        ),
+    ),
     min_completeness: float | None = typer.Option(None, "--min-completeness", help="Minimum completeness threshold."),
     max_contamination: float | None = typer.Option(None, "--max-contamination", help="Maximum contamination threshold."),
     mash_sketch_size: int | None = typer.Option(None, "--mash-sketch-size", min=1, help="Mash sketch size."),
