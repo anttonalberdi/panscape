@@ -27,6 +27,7 @@ from panscape.build.fasta import (
     normalize_fasta_file,
     write_fasta_records,
 )
+from panscape.build.gene_filter import filter_genes_by_length
 from panscape.build.gene_calling import CalledGene, call_genes, write_gene_outputs
 from panscape.build.graph import connected_components
 from panscape.build.kmer import mock_mash_distance, unique_kmer_fractions
@@ -45,7 +46,7 @@ from panscape.runners.mash import MashRunner
 from panscape.runners.mmseqs import MMseqsRunner
 from panscape.runners.skani import SkaniRunner
 from panscape.utils.io import ensure_dir, write_json, write_text, write_tsv
-from panscape.utils.subprocess import CommandExecutionError, CommandResult
+from panscape.utils.subprocess import CommandResult
 from panscape.utils.validation import FASTA_SUFFIXES, validate_existing_file
 
 app = typer.Typer(help="Build species clusters, backbones, and species pangenome catalogs.")
@@ -94,7 +95,6 @@ class SpeciesComponentSelection:
 
 CHECKM2_DMND_FILENAME = "uniref100.KO.1.dmnd"
 SpeciesRepresentationMode = Literal["best", "consensus", "medoid"]
-CHECKM2_WORKAROUND_MIN_GENE_LEN = 90
 
 
 def _parse_optional_float(raw_value: str, *, field_name: str, row_number: int) -> float | None:
@@ -349,31 +349,26 @@ def _prepare_checkm2_gene_inputs(
     output_dir: Path,
     force: bool,
     threads: int,
-) -> list[Path]:
+    min_gene_len: int,
+) -> tuple[list[Path], dict[str, list[CalledGene]]]:
     """Generate per-genome protein FASTAs for CheckM2 `--genes` mode.
 
-    This is a workaround for CheckM2 multiprocessing failures observed on
-    Python 3.12+ environments when CheckM2 runs its internal prodigal step.
+    Uses standard pyrodigal gene calls (no length filtering). Length filtering
+    is applied later in the PanScape pipeline.
     """
 
     ensure_dir(output_dir)
     target_ids = sorted(set(genome_ids))
 
-    def _write_one(genome_id: str) -> Path:
+    def _write_one(genome_id: str) -> tuple[str, Path, list[CalledGene]]:
         context = contexts[genome_id]
         genes = call_genes(
             genome_id=genome_id,
             records=context.normalized_records,
-            min_gene_len=CHECKM2_WORKAROUND_MIN_GENE_LEN,
+            min_gene_len=min_gene_len,
             mock=False,
+            apply_min_gene_len=False,
         )
-        if len(genes) == 0:
-            genes = call_genes(
-                genome_id=genome_id,
-                records=context.normalized_records,
-                min_gene_len=30,
-                mock=False,
-            )
 
         aa_records = [
             FastaRecord(header=gene.gene_id, sequence=gene.aa_sequence or "X")
@@ -385,9 +380,10 @@ def _prepare_checkm2_gene_inputs(
 
         path = output_dir / f"{genome_id}.faa"
         write_fasta_records(path, aa_records, force=force)
-        return path
+        return genome_id, path, genes
 
     output_paths: list[Path] = []
+    genes_by_genome: dict[str, list[CalledGene]] = {}
     max_workers = max(1, min(threads, len(target_ids)))
     with Progress(
         SpinnerColumn(),
@@ -400,10 +396,12 @@ def _prepare_checkm2_gene_inputs(
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [pool.submit(_write_one, genome_id) for genome_id in target_ids]
             for future in as_completed(futures):
-                output_paths.append(future.result())
+                genome_id, path, genes = future.result()
+                output_paths.append(path)
+                genes_by_genome[genome_id] = genes
                 progress.advance(task)
 
-    return sorted(output_paths, key=lambda path: path.name)
+    return sorted(output_paths, key=lambda path: path.name), genes_by_genome
 
 
 def _run_checkm2_with_spinner(
@@ -1064,6 +1062,7 @@ def run_build(
             return 0
 
         output_paths: list[Path] = []
+        raw_genes_by_genome: dict[str, list[CalledGene]] = {}
 
         # Step 2: FASTA normalization + stats
         contexts: dict[str, GenomeContext] = {}
@@ -1117,57 +1116,33 @@ def run_build(
             else:
                 checkm2_dir = ensure_dir(build_dir / "checkm2")
                 checkm2_tmp_dir = ensure_dir(build_dir / "tmp" / "checkm2")
-                checkm2_extension = detect_fasta_extension(
-                    contexts[genome_id].normalized_fasta for genome_id in missing_qc_ids
+                checkm2_genes_dir = ensure_dir(build_dir / "tmp" / "checkm2_genes")
+
+                _, genes_for_checkm2 = _prepare_checkm2_gene_inputs(
+                    missing_qc_ids,
+                    contexts=contexts,
+                    output_dir=checkm2_genes_dir,
+                    force=True,
+                    threads=cfg.threads,
+                    min_gene_len=cfg.min_gene_len,
                 )
-                try:
-                    _run_checkm2_with_spinner(
-                        checkm2_runner,
-                        description="Running CheckM2 QC",
-                        predict_kwargs={
-                            "input_dir": normalized_dir,
-                            "output_dir": checkm2_dir,
-                            "threads": cfg.threads,
-                            "database_path": resolved_checkm2_db,
-                            "extension": checkm2_extension,
-                            "tmp_dir": checkm2_tmp_dir,
-                            "force": cfg.force,
-                            "dry_run": cfg.dry_run,
-                        },
-                    )
-                except CommandExecutionError as exc:
-                    if _looks_like_checkm2_multiprocessing_bug(str(exc)):
-                        logger.warning(
-                            "CheckM2 internal gene-calling multiprocessing bug detected. "
-                            "Falling back to pyrodigal precomputed proteins with "
-                            "CheckM2 --genes mode (threads=%s).",
-                            cfg.threads,
-                        )
-                        checkm2_genes_dir = ensure_dir(build_dir / "tmp" / "checkm2_genes")
-                        _prepare_checkm2_gene_inputs(
-                            missing_qc_ids,
-                            contexts=contexts,
-                            output_dir=checkm2_genes_dir,
-                            force=True,
-                            threads=cfg.threads,
-                        )
-                        _run_checkm2_with_spinner(
-                            checkm2_runner,
-                            description="Running CheckM2 QC (--genes fallback)",
-                            predict_kwargs={
-                                "input_dir": checkm2_genes_dir,
-                                "output_dir": checkm2_dir,
-                                "threads": cfg.threads,
-                                "database_path": resolved_checkm2_db,
-                                "genes": True,
-                                "extension": "faa",
-                                "tmp_dir": checkm2_tmp_dir,
-                                "force": True,
-                                "dry_run": cfg.dry_run,
-                            },
-                        )
-                    else:
-                        raise
+                raw_genes_by_genome.update(genes_for_checkm2)
+
+                _run_checkm2_with_spinner(
+                    checkm2_runner,
+                    description="Running CheckM2 QC (--genes)",
+                    predict_kwargs={
+                        "input_dir": checkm2_genes_dir,
+                        "output_dir": checkm2_dir,
+                        "threads": cfg.threads,
+                        "database_path": resolved_checkm2_db,
+                        "genes": True,
+                        "extension": "faa",
+                        "tmp_dir": checkm2_tmp_dir,
+                        "force": cfg.force,
+                        "dry_run": cfg.dry_run,
+                    },
+                )
                 report_path = _find_checkm2_report(checkm2_dir)
                 checkm2_predictions = _parse_checkm2_report(
                     report_path,
@@ -1579,12 +1554,27 @@ def run_build(
 
         def _call_genes_for_genome(genome_id: str) -> tuple[str, list[CalledGene], tuple[Path, Path, Path]]:
             context = contexts[genome_id]
-            genes = call_genes(
-                genome_id=genome_id,
-                records=context.normalized_records,
-                min_gene_len=cfg.min_gene_len,
-                mock=cfg.mock,
-            )
+            if cfg.mock:
+                genes = call_genes(
+                    genome_id=genome_id,
+                    records=context.normalized_records,
+                    min_gene_len=cfg.min_gene_len,
+                    mock=True,
+                )
+            else:
+                genes_raw = raw_genes_by_genome.get(genome_id)
+                if genes_raw is None:
+                    genes_raw = call_genes(
+                        genome_id=genome_id,
+                        records=context.normalized_records,
+                        min_gene_len=cfg.min_gene_len,
+                        mock=False,
+                        apply_min_gene_len=False,
+                    )
+                    raw_genes_by_genome[genome_id] = genes_raw
+
+                genes = filter_genes_by_length(genes_raw, cfg.min_gene_len)
+
             paths = write_gene_outputs(
                 genome_id=genome_id,
                 genes=genes,
@@ -1597,6 +1587,7 @@ def run_build(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
             TimeElapsedColumn(),
             console=console,
         ) as progress:

@@ -145,7 +145,7 @@ def _call_genes_pyrodigal(
     *,
     genome_id: str,
     records: Iterable[FastaRecord],
-    min_gene_len: int,
+    min_gene_len: int | None,
 ) -> list[CalledGene]:
     try:
         import pyrodigal
@@ -176,7 +176,7 @@ def _call_genes_pyrodigal(
             nt_sequence = record.sequence[begin - 1 : end]
             if strand == "-":
                 nt_sequence = reverse_complement(nt_sequence)
-            if len(nt_sequence) < min_gene_len:
+            if min_gene_len is not None and len(nt_sequence) < min_gene_len:
                 continue
 
             if hasattr(prediction, "translate"):
@@ -208,13 +208,15 @@ def call_genes(
     records: Iterable[FastaRecord],
     min_gene_len: int,
     mock: bool,
+    apply_min_gene_len: bool = True,
 ) -> list[CalledGene]:
     """Call genes from normalized FASTA records."""
 
     if mock:
         return _call_genes_mock(genome_id=genome_id, records=records, min_gene_len=min_gene_len)
 
-    return _call_genes_pyrodigal(genome_id=genome_id, records=records, min_gene_len=min_gene_len)
+    resolved_min_len: int | None = min_gene_len if apply_min_gene_len else None
+    return _call_genes_pyrodigal(genome_id=genome_id, records=records, min_gene_len=resolved_min_len)
 
 
 def write_gene_outputs(
