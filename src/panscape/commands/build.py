@@ -1116,7 +1116,7 @@ def run_build(
                 checkm2_predictions = _mock_checkm2_predictions(contexts)
             else:
                 checkm2_dir = ensure_dir(build_dir / "checkm2")
-                checkm2_tmp_dir = ensure_dir(checkm2_dir / "tmp")
+                checkm2_tmp_dir = ensure_dir(build_dir / "tmp" / "checkm2")
                 checkm2_extension = detect_fasta_extension(
                     contexts[genome_id].normalized_fasta for genome_id in missing_qc_ids
                 )
@@ -1143,7 +1143,7 @@ def run_build(
                             "CheckM2 --genes mode (threads=%s).",
                             cfg.threads,
                         )
-                        checkm2_genes_dir = ensure_dir(checkm2_dir / "input_genes")
+                        checkm2_genes_dir = ensure_dir(build_dir / "tmp" / "checkm2_genes")
                         _prepare_checkm2_gene_inputs(
                             missing_qc_ids,
                             contexts=contexts,
