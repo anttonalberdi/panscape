@@ -7,6 +7,21 @@ read mapping, species artifact generation, and strain deconvolution workflows.
 
 ## Install
 
+### Conda (recommended)
+
+```bash
+conda env create -f environment.yml
+conda activate panscape
+```
+
+To update an existing env:
+
+```bash
+conda env update -f environment.yml --prune
+```
+
+### pip + venv
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
@@ -88,6 +103,7 @@ CLI options override config values.
 outdir/
   panscape_manifest.json
   build/
+    checkm2/quality_report.tsv
     species_clusters.tsv
     backbones/
     pangenomes/<species_id>/{genes.fna,genes.faa,gene_families.tsv,index/}

@@ -9,12 +9,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
-from typing import Iterable, Literal
+from typing import Any, Iterable, Literal
 
 import typer
+from rich import box
 from rich.console import Console
+from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+from rich.table import Table
 
+from panscape import __version__
 from panscape.build.derep import DerepGene, DerepGroup, dereplicate_family
 from panscape.build.fasta import (
     AssemblyStats,
@@ -41,7 +45,7 @@ from panscape.runners.mash import MashRunner
 from panscape.runners.mmseqs import MMseqsRunner
 from panscape.runners.skani import SkaniRunner
 from panscape.utils.io import ensure_dir, write_json, write_text, write_tsv
-from panscape.utils.subprocess import CommandExecutionError
+from panscape.utils.subprocess import CommandExecutionError, CommandResult
 from panscape.utils.validation import FASTA_SUFFIXES, validate_existing_file
 
 app = typer.Typer(help="Build species clusters, backbones, and species pangenome catalogs.")
@@ -385,12 +389,46 @@ def _prepare_checkm2_gene_inputs(
 
     output_paths: list[Path] = []
     max_workers = max(1, min(threads, len(target_ids)))
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = [pool.submit(_write_one, genome_id) for genome_id in target_ids]
-        for future in as_completed(futures):
-            output_paths.append(future.result())
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Preparing CheckM2 protein inputs", total=len(target_ids))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_write_one, genome_id) for genome_id in target_ids]
+            for future in as_completed(futures):
+                output_paths.append(future.result())
+                progress.advance(task)
 
     return sorted(output_paths, key=lambda path: path.name)
+
+
+def _run_checkm2_with_spinner(
+    runner: CheckM2Runner,
+    *,
+    description: str,
+    predict_kwargs: dict[str, Any],
+) -> CommandResult:
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        progress.add_task(description, total=None)
+        result = runner.predict(**predict_kwargs)
+
+    if result.stdout.strip():
+        console.print("[bold dim]CheckM2 stdout[/bold dim]")
+        console.print(result.stdout.rstrip())
+    if result.stderr.strip():
+        console.print("[bold dim]CheckM2 stderr[/bold dim]")
+        console.print(result.stderr.rstrip())
+
+    return result
 
 
 def _format_optional_float(value: float | None, digits: int = 4) -> str:
@@ -601,19 +639,14 @@ def _parse_checkm2_report(report_path: Path) -> dict[str, tuple[float, float]]:
 
 
 def _find_checkm2_report(checkm2_dir: Path) -> Path:
-    candidates = [
-        checkm2_dir / "quality_report.tsv",
-        checkm2_dir / "predictions.tsv",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
+    report_path = checkm2_dir / "quality_report.tsv"
+    if report_path.exists():
+        return report_path
 
-    tsv_files = sorted(checkm2_dir.rglob("*.tsv"))
-    if not tsv_files:
-        raise PanScapeUsageError(f"Unable to find CheckM2 report in {checkm2_dir}")
-
-    return tsv_files[0]
+    raise PanScapeUsageError(
+        "CheckM2 did not produce `quality_report.tsv` in "
+        f"{checkm2_dir}. Ensure CheckM2 completed successfully."
+    )
 
 
 def _cluster_proteins_mock(genes: list[CalledGene]) -> list[FamilyCluster]:
@@ -739,6 +772,46 @@ def _print_plan(step_plan: list[str]) -> None:
         console.print(f"  {idx}. {step}")
 
 
+def _print_intro(
+    *,
+    cfg: BuildConfig,
+    species_representation_mode: SpeciesRepresentationMode,
+    input_mode: str,
+    total_genomes: int,
+    missing_qc_count: int,
+) -> None:
+    banner = Panel(
+        (
+            f"[bold cyan]PanScape {__version__}[/bold cyan]\n"
+            "[white]Species-resolved pangenome build pipeline[/white]\n"
+            "[dim]Deterministic outputs with explicit manifests and tool provenance.[/dim]"
+        ),
+        title="[bold]Build[/bold]",
+        border_style="cyan",
+        expand=False,
+    )
+    console.print(banner)
+
+    stats = Table(
+        title="[bold]Run Overview[/bold]",
+        box=box.SIMPLE_HEAVY,
+        show_header=False,
+        expand=False,
+    )
+    stats.add_column("Key", style="bold cyan")
+    stats.add_column("Value", style="white")
+    stats.add_row("Input mode", input_mode)
+    stats.add_row("Genomes detected", str(total_genomes))
+    stats.add_row("Missing QC", str(missing_qc_count))
+    stats.add_row("CheckM2 auto-run", "yes" if cfg.run_checkm2 else "no")
+    stats.add_row("Species representation", species_representation_mode)
+    stats.add_row("Threads", str(cfg.threads))
+    stats.add_row("Mock mode", "yes" if cfg.mock else "no")
+    stats.add_row("Dry run", "yes" if cfg.dry_run else "no")
+    stats.add_row("Output root", str(cfg.outdir))
+    console.print(stats)
+
+
 def run_build(
     *,
     config_path: Path | None,
@@ -855,6 +928,25 @@ def run_build(
         if len(genomes) == 0:
             raise PanScapeUsageError("No genomes available for build.")
 
+        missing_qc_ids = [
+            genome.genome_id
+            for genome in genomes
+            if genome.completeness is None or genome.contamination is None
+        ]
+
+        input_mode_label = (
+            "genomes.tsv"
+            if using_manifest
+            else ("genomes-files" if using_file_list else "genomes-path")
+        )
+        _print_intro(
+            cfg=cfg,
+            species_representation_mode=species_representation_mode,
+            input_mode=input_mode_label,
+            total_genomes=len(genomes),
+            missing_qc_count=len(missing_qc_ids),
+        )
+
         layout = create_output_layout(cfg.outdir)
         build_dir = ensure_dir(layout.build_dir)
 
@@ -877,12 +969,6 @@ def run_build(
         skani_runner = SkaniRunner()
         mmseqs_runner = MMseqsRunner()
         checkm2_runner = CheckM2Runner()
-
-        missing_qc_ids = [
-            genome.genome_id
-            for genome in genomes
-            if genome.completeness is None or genome.contamination is None
-        ]
 
         tool_versions: dict[str, str] = {}
         if cfg.mock:
@@ -1007,19 +1093,23 @@ def run_build(
             if cfg.mock:
                 checkm2_predictions = _mock_checkm2_predictions(contexts)
             else:
-                checkm2_dir = ensure_dir(qc_dir / "checkm2")
+                checkm2_dir = ensure_dir(build_dir / "checkm2")
                 checkm2_extension = detect_fasta_extension(
                     contexts[genome_id].normalized_fasta for genome_id in missing_qc_ids
                 )
                 try:
-                    checkm2_runner.predict(
-                        input_dir=normalized_dir,
-                        output_dir=checkm2_dir,
-                        threads=cfg.threads,
-                        database_path=resolved_checkm2_db,
-                        extension=checkm2_extension,
-                        force=cfg.force,
-                        dry_run=cfg.dry_run,
+                    _run_checkm2_with_spinner(
+                        checkm2_runner,
+                        description="Running CheckM2 QC",
+                        predict_kwargs={
+                            "input_dir": normalized_dir,
+                            "output_dir": checkm2_dir,
+                            "threads": cfg.threads,
+                            "database_path": resolved_checkm2_db,
+                            "extension": checkm2_extension,
+                            "force": cfg.force,
+                            "dry_run": cfg.dry_run,
+                        },
                     )
                 except CommandExecutionError as exc:
                     if _looks_like_checkm2_multiprocessing_bug(str(exc)):
@@ -1029,7 +1119,7 @@ def run_build(
                             "CheckM2 --genes mode (threads=%s).",
                             cfg.threads,
                         )
-                        checkm2_genes_dir = ensure_dir(qc_dir / "checkm2_input_genes")
+                        checkm2_genes_dir = ensure_dir(checkm2_dir / "input_genes")
                         _prepare_checkm2_gene_inputs(
                             missing_qc_ids,
                             contexts=contexts,
@@ -1037,15 +1127,19 @@ def run_build(
                             force=True,
                             threads=cfg.threads,
                         )
-                        checkm2_runner.predict(
-                            input_dir=checkm2_genes_dir,
-                            output_dir=checkm2_dir,
-                            threads=cfg.threads,
-                            database_path=resolved_checkm2_db,
-                            genes=True,
-                            extension="faa",
-                            force=True,
-                            dry_run=cfg.dry_run,
+                        _run_checkm2_with_spinner(
+                            checkm2_runner,
+                            description="Running CheckM2 QC (--genes fallback)",
+                            predict_kwargs={
+                                "input_dir": checkm2_genes_dir,
+                                "output_dir": checkm2_dir,
+                                "threads": cfg.threads,
+                                "database_path": resolved_checkm2_db,
+                                "genes": True,
+                                "extension": "faa",
+                                "force": True,
+                                "dry_run": cfg.dry_run,
+                            },
                         )
                     else:
                         raise
