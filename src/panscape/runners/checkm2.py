@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import Mapping
 
 from panscape.runners.base import ToolRunner
 from panscape.utils.subprocess import CommandResult
@@ -31,6 +32,8 @@ class CheckM2Runner(ToolRunner):
         database_path: Path | None,
         genes: bool = False,
         extension: str | None = None,
+        tmp_dir: Path | None = None,
+        env: Mapping[str, str] | None = None,
         force: bool = False,
         dry_run: bool = False,
     ) -> CommandResult:
@@ -65,4 +68,10 @@ class CheckM2Runner(ToolRunner):
             args.extend(["--extension", extension])
         if force:
             args.append("--force")
-        return self.run(args, dry_run=dry_run)
+
+        env_payload = dict(env) if env is not None else {}
+        if tmp_dir is not None:
+            tmp_value = str(tmp_dir)
+            env_payload.update({"TMPDIR": tmp_value, "TMP": tmp_value, "TEMP": tmp_value})
+
+        return self.run(args, dry_run=dry_run, env=env_payload or None)

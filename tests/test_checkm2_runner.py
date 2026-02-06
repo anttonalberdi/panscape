@@ -23,6 +23,7 @@ def test_checkm2_predict_uses_directory_input_and_extension(monkeypatch) -> None
         threads=8,
         database_path=Path("db/uniref100.KO.1.dmnd"),
         extension="fna",
+        tmp_dir=Path("tmp_dir"),
         force=True,
         dry_run=False,
     )
@@ -34,6 +35,8 @@ def test_checkm2_predict_uses_directory_input_and_extension(monkeypatch) -> None
     assert "--extension" in args
     assert "fna" in args
     assert "--genes" not in args
+    env = captured["kwargs"]["env"]
+    assert env["TMPDIR"] == "tmp_dir"
 
 
 def test_checkm2_predict_supports_genes_mode_with_multiple_inputs(monkeypatch) -> None:
@@ -53,6 +56,7 @@ def test_checkm2_predict_supports_genes_mode_with_multiple_inputs(monkeypatch) -
         threads=4,
         database_path=Path("db/uniref100.KO.1.dmnd"),
         genes=True,
+        tmp_dir=Path("tmp_dir"),
         force=True,
         dry_run=False,
     )
@@ -64,3 +68,5 @@ def test_checkm2_predict_supports_genes_mode_with_multiple_inputs(monkeypatch) -
     assert "g2.faa" in args
     assert "--genes" in args
     assert "--extension" not in args
+    env = captured["kwargs"]["env"]
+    assert env["TMPDIR"] == "tmp_dir"

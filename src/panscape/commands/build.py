@@ -603,7 +603,29 @@ def _mock_checkm2_predictions(contexts: dict[str, GenomeContext]) -> dict[str, t
     return predictions
 
 
-def _parse_checkm2_report(report_path: Path) -> dict[str, tuple[float, float]]:
+def _resolve_checkm2_genome_id(raw_name: str, expected_ids: set[str]) -> str:
+    if raw_name in expected_ids:
+        return raw_name
+
+    lowered = raw_name.lower()
+    for suffix in sorted(FASTA_SUFFIXES, key=len, reverse=True):
+        if lowered.endswith(suffix):
+            candidate = raw_name[: -len(suffix)]
+            if candidate in expected_ids:
+                return candidate
+
+    stem_candidate = Path(raw_name).stem
+    if stem_candidate in expected_ids:
+        return stem_candidate
+
+    return raw_name
+
+
+def _parse_checkm2_report(
+    report_path: Path,
+    *,
+    expected_ids: set[str],
+) -> dict[str, tuple[float, float]]:
     with report_path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
         if reader.fieldnames is None:
@@ -626,7 +648,7 @@ def _parse_checkm2_report(report_path: Path) -> dict[str, tuple[float, float]]:
             if name == "":
                 continue
 
-            genome_id = Path(name).stem
+            genome_id = _resolve_checkm2_genome_id(name, expected_ids)
             try:
                 completeness = float((row.get(comp_col) or "").strip())
                 contamination = float((row.get(contam_col) or "").strip())
@@ -1094,6 +1116,7 @@ def run_build(
                 checkm2_predictions = _mock_checkm2_predictions(contexts)
             else:
                 checkm2_dir = ensure_dir(build_dir / "checkm2")
+                checkm2_tmp_dir = ensure_dir(checkm2_dir / "tmp")
                 checkm2_extension = detect_fasta_extension(
                     contexts[genome_id].normalized_fasta for genome_id in missing_qc_ids
                 )
@@ -1107,6 +1130,7 @@ def run_build(
                             "threads": cfg.threads,
                             "database_path": resolved_checkm2_db,
                             "extension": checkm2_extension,
+                            "tmp_dir": checkm2_tmp_dir,
                             "force": cfg.force,
                             "dry_run": cfg.dry_run,
                         },
@@ -1137,6 +1161,7 @@ def run_build(
                                 "database_path": resolved_checkm2_db,
                                 "genes": True,
                                 "extension": "faa",
+                                "tmp_dir": checkm2_tmp_dir,
                                 "force": True,
                                 "dry_run": cfg.dry_run,
                             },
@@ -1144,7 +1169,10 @@ def run_build(
                     else:
                         raise
                 report_path = _find_checkm2_report(checkm2_dir)
-                checkm2_predictions = _parse_checkm2_report(report_path)
+                checkm2_predictions = _parse_checkm2_report(
+                    report_path,
+                    expected_ids={genome.genome_id for genome in genomes},
+                )
 
         qc_by_genome: dict[str, GenomeQC] = {}
         qc_rows: list[list[str]] = []
